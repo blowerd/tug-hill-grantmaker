@@ -18,11 +18,16 @@ try:
     # Parse GeoJSON strings into Dicts for PyDeck
     df['geometry'] = df['geometry'].apply(json.loads)
 except Exception as e:
-    st.error("Database not found. Run 'src/simulation.py' locally first!")
+    st.error("Database not found. Run 'src/etl.py' locally first!")
     st.stop()
 
 # --- 2. SIDEBAR ---
 st.sidebar.title("🎯 Tug Hill Grant Strategy")
+st.sidebar.markdown("### 🕵️ Data Debug")
+st.sidebar.info(f"Total Tracts Loaded: {len(df)}")
+#st.sidebar.caption(f"Visible Tracts (filtered): {len(filtered_df)}")
+if st.sidebar.checkbox("Show Raw Data Table"):
+    st.dataframe(df[['name', 'overall_svi', 'context_tag']])
 svi_threshold = st.sidebar.slider("Minimum SVI (Need)", 0.0, 1.0, 0.3)
 show_deserts = st.sidebar.checkbox("Highlight Urgent Deserts", value=True)
 
@@ -32,33 +37,43 @@ with st.sidebar.expander("⚖️ Legal / Disclaimer", expanded=False):
 # --- 3. MAP LOGIC ---
 st.title("Regional Opportunity Map")
 
-# Filter Data based on Slider
-filtered_df = df[df['overall_svi'] >= svi_threshold].copy()
+display_df = df.copy() # <-- NEW
 
 def get_color(row):
+    # 1. CHECK THE SLIDER (The "Dimming" Logic)
+    if row['overall_svi'] < svi_threshold:
+        # Return a very transparent grey (Ghost Mode)
+        # [R, G, B, Alpha] -> Alpha 20 is barely visible
+        return [200, 200, 200, 20] 
+        
+    # 2. STANDARD LOGIC (For visible tracts)
     if row['context_tag'] == 'Urgent Desert' and show_deserts:
         return [200, 30, 30, 200]  # Red
     elif row['context_tag'] == 'High-Capacity Hub':
         return [30, 200, 30, 160]  # Green
     else:
-        return [100, 100, 100, 100] # Grey
+        return [30, 100, 200, 140] # Blue (The standard "Visible" color)
 
-filtered_df['fill_color'] = filtered_df.apply(get_color, axis=1)
+display_df['fill_color'] = display_df.apply(get_color, axis=1)
 
-# Define Layer with Explicit ID
+# Define Layer
 layer = pdk.Layer(
     "GeoJsonLayer", 
-    filtered_df,
+    display_df,      # Use the full dataset
     id="geojson", 
     get_polygon="geometry", 
     get_fill_color="fill_color",
-    get_line_color=[255, 255, 255], 
+    # Dynamic Line Color: Hide lines for "Ghost" tracts to reduce clutter
+    get_line_color="[255, 255, 255, 80]", 
     pickable=True, 
     auto_highlight=True, 
-    opacity=0.8
+    opacity=0.8,
+    stroked=True,
+    get_line_width=20
 )
 
-view_state = pdk.ViewState(latitude=43.98, longitude=-75.8, zoom=9)
+# UPDATED ZOOM: Centered to show Jefferson, Lewis, and St. Lawrence
+view_state = pdk.ViewState(latitude=44.2, longitude=-75.4, zoom=7.5)
 
 # RENDER MAP & CAPTURE CLICK
 event = st.pydeck_chart(
@@ -87,7 +102,7 @@ with col1:
     st.subheader("Priority Zones")
     display_cols = ['name', 'context_tag', 'overall_svi', 'count_assets']
     st.dataframe(
-        filtered_df[display_cols].sort_values('overall_svi', ascending=False), 
+        display_df[display_cols].sort_values('overall_svi', ascending=False), 
         hide_index=True, 
         use_container_width=True
     )
@@ -96,7 +111,7 @@ with col2:
     st.subheader("🔍 Tract Inspector")
     
     # Get list of valid names for the dropdown
-    available_names = list(filtered_df['name'].unique())
+    available_names = list(display_df['name'].unique())
     
     # LOGIC: Sync Dropdown with Map Click
     # If the clicked tract is in the current filtered list, set it as default.
@@ -118,7 +133,7 @@ with col2:
         
         # --- RENDER DETAILS ---
         # Safe Row Fetch
-        match = filtered_df[filtered_df['name'] == selected_name]
+        match = display_df[display_df['name'] == selected_name]
         if match.empty:
             st.warning("Selection not available in current filter.")
             st.stop()
@@ -143,6 +158,11 @@ with col2:
                       delta="High Vulnerability" if row['overall_svi'] > 0.75 else "Stable",
                       delta_color="inverse")
             k2.metric("Population", f"{d.get('total_pop', 'N/A'):,}")
+            
+            # Extra Metrics from ETL
+            k3, k4 = st.columns(2)
+            k3.metric("Broadband Access", f"{d.get('pct_broadband', 0)}%")
+            k4.metric("Uninsured", f"{d.get('pct_uninsured', 0)}%")
 
             # Status Banner
             if "Desert" in row['context_tag']:
@@ -171,11 +191,8 @@ with col2:
 
         with tab_capacity:
             st.markdown(f"**Asset Count:** {row['count_assets']}")
-            # In a real app, query the 'raw_assets' table here for this tract_id
-            # conn = get_connection()
-            # assets = pd.read_sql(f"SELECT * FROM raw_assets WHERE tract_id = '{match.iloc[0]['tract_id']}'", conn)
-            # st.dataframe(assets)
-            st.caption("List of known community assets would appear here.")
+            st.caption("Estimated count based on regional infrastructure density.")
+            # In a real app, query the 'raw_assets' table here
         
     else:
         st.warning("No tracts found. Try lowering the SVI threshold.")
