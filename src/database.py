@@ -1,20 +1,28 @@
 import sqlite3
 from sqlite3 import Connection
 import os
+from pathlib import Path
 
-DB_NAME = "grant_maker.db"
+# --- THE FIX: ABSOLUTE PATHING ---
+# Find the 'src' directory
+BASE_DIR = Path(__file__).resolve().parent.parent 
+# Force DB to live in the Project Root, always.
+DB_PATH = BASE_DIR / "grant_maker.db"
 
 def get_connection() -> Connection:
-    conn = sqlite3.connect(DB_NAME)
+    # Connect to the absolute path
+    conn = sqlite3.connect(str(DB_PATH)) 
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
-
+    
+    # ... (Rest of your SQL schema remains exactly the same) ...
+    # ... Copy/Paste your existing table/view definitions here ...
+    
     # --- RAW TABLES ---
-    # Note: We added demographics_json here previously
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS raw_tracts (
             tract_id TEXT PRIMARY KEY, 
@@ -27,16 +35,15 @@ def init_db():
             demographics_json JSON
         );
     """)
+    # (Keep all other tables...)
     cursor.execute("CREATE TABLE IF NOT EXISTS raw_orgs (org_id TEXT PRIMARY KEY, name TEXT, budget INTEGER, years_operating INTEGER);")
     cursor.execute("CREATE TABLE IF NOT EXISTS raw_offices (office_id TEXT PRIMARY KEY, org_id TEXT, tract_id TEXT, office_type TEXT, FOREIGN KEY(org_id) REFERENCES raw_orgs(org_id));")
     cursor.execute("CREATE TABLE IF NOT EXISTS raw_assets (asset_id TEXT PRIMARY KEY, tract_id TEXT, type TEXT);")
     cursor.execute("CREATE TABLE IF NOT EXISTS raw_grants (grant_id TEXT PRIMARY KEY, org_id TEXT, amount INTEGER, status TEXT, theme TEXT);")
     cursor.execute("CREATE TABLE IF NOT EXISTS link_grant_area (link_id INTEGER PRIMARY KEY, grant_id TEXT, tract_id TEXT, pct_allocation REAL);")
 
-    # --- REPORTING VIEW (The Business Logic) ---
+    # --- REPORTING VIEW ---
     cursor.execute("DROP VIEW IF EXISTS vw_tract_profile")
-    
-    # CRITICAL FIX: Added 't.demographics_json' to the SELECT list below
     cursor.execute("""
     CREATE VIEW vw_tract_profile AS
     SELECT 
@@ -45,22 +52,15 @@ def init_db():
         t.geometry, 
         t.overall_svi, 
         t.housing_svi,
-        t.demographics_json,  -- <--- THE MISSING LINK
-        
-        -- Logic: Ranking Need
+        t.demographics_json,
         RANK() OVER (ORDER BY t.overall_svi DESC) as local_svi_rank,
-        
-        -- Logic: Counting Capacity
         COUNT(DISTINCT a.asset_id) as count_assets,
-        
-        -- Logic: Determining Context
         CASE 
             WHEN t.overall_svi > 0.75 AND COUNT(DISTINCT a.asset_id) < 2 THEN 'Urgent Desert'
             WHEN t.overall_svi > 0.75 AND COUNT(DISTINCT a.asset_id) >= 4 THEN 'High-Capacity Hub'
             WHEN t.overall_svi < 0.25 THEN 'Stable / Low Need'
             ELSE 'General Opportunity'
         END as context_tag
-
     FROM raw_tracts t
     LEFT JOIN raw_assets a ON t.tract_id = a.tract_id
     GROUP BY t.tract_id;
@@ -70,6 +70,7 @@ def init_db():
     conn.close()
 
 def reset_db():
-    if os.path.exists(DB_NAME):
-        os.remove(DB_NAME)
+    # Delete the ABSOLUTE path file
+    if DB_PATH.exists():
+        os.remove(DB_PATH)
     init_db()
